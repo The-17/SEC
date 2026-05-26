@@ -10,8 +10,26 @@ import (
 	"sec/pkg/config"
 )
 
+// ValidateKID checks if a key ID is safe to use as a file name,
+// preventing path traversal attacks (e.g. "../default").
+func ValidateKID(kid string) error {
+	if kid == "" {
+		return fmt.Errorf("KID cannot be empty")
+	}
+	for _, r := range kid {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return fmt.Errorf("invalid KID %q: must contain only alphanumeric characters, underscores, or dashes", kid)
+		}
+	}
+	return nil
+}
+
 // GenerateKeyPair generates an Ed25519 keypair and writes it to ~/.sec/keys/<kid>.key and <kid>.pub.
 func GenerateKeyPair(kid string) error {
+	if err := ValidateKID(kid); err != nil {
+		return err
+	}
+
 	// 1. Generate Ed25519 key pair in memory
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -69,6 +87,10 @@ func GenerateKeyPair(kid string) error {
 
 // LoadPrivateKey loads and decodes an Ed25519 private key from ~/.sec/keys/<kid>.key.
 func LoadPrivateKey(kid string) (ed25519.PrivateKey, error) {
+	if err := ValidateKID(kid); err != nil {
+		return nil, err
+	}
+
 	keysDir, err := config.GetKeysDir()
 	if err != nil {
 		return nil, err
@@ -101,6 +123,10 @@ func LoadPrivateKey(kid string) (ed25519.PrivateKey, error) {
 
 // LoadPublicKey loads and decodes an Ed25519 public key from ~/.sec/keys/<kid>.pub.
 func LoadPublicKey(kid string) (ed25519.PublicKey, error) {
+	if err := ValidateKID(kid); err != nil {
+		return nil, err
+	}
+
 	keysDir, err := config.GetKeysDir()
 	if err != nil {
 		return nil, err

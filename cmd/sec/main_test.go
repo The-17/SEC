@@ -115,207 +115,100 @@ func TestCLI_EndToEnd(t *testing.T) {
 		t.Fatalf("expected public key file to exist at %s", defaultPubPath)
 	}
 
-	// 2. Initialize a separate keypair for delegation (sec init --kid session)
-	_, _, exitCode, err = runSec(tempHome, "init", "--kid", "session")
-	if err != nil || exitCode != 0 {
-		t.Fatalf("init --kid session failed: %v, exitCode=%d", err, exitCode)
-	}
-	sessionPubB64, err := getRawPublicKeyB64(tempHome, "session")
-	if err != nil {
-		t.Fatalf("failed to load session public key bytes: %v", err)
-	}
-
-	// 3. Sign a root contract with default key, including session public key spk
+	// 2. Sign a valid contract
 	stdout, stderr, exitCode, err = runSec(tempHome, "sign",
-		"--objective", "root task",
-		"--allow", "github.issues.read,github.issues.write",
-		"--deny", "github.issues.delete",
-		"--scope", "repositories=The-17/agentsecrets",
-		"--audience", "github",
+		"--objective", "summarise open pulls",
+		"--allow", "api.github.com/repos/The-17/agentsecrets/pulls*",
 		"--ttl", "5m",
-		"--spk", sessionPubB64,
 	)
 	if err != nil || exitCode != 0 {
 		t.Fatalf("sign failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
 	}
 
-	rootToken := strings.TrimSpace(stdout)
-	if rootToken == "" {
+	token := strings.TrimSpace(stdout)
+	if token == "" {
 		t.Fatal("expected non-empty token from sign command")
 	}
 
-	// Decode root contract to get its JTI for delegation
-	parts := strings.Split(rootToken, ".")
-	if len(parts) != 2 {
-		t.Fatalf("invalid token format: %q", rootToken)
-	}
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		t.Fatalf("failed to decode root payload: %v", err)
-	}
-	var rootContract contract.SECContract
-	if err := json.Unmarshal(payloadBytes, &rootContract); err != nil {
-		t.Fatalf("failed to unmarshal root contract: %v", err)
-	}
-	rootJTI := rootContract.JTI
-
-	// 4. Verify root token directly
+	// 3. Verify token successfully
 	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", rootToken,
-		"--capability", "github.issues.read",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
+		"--token", token,
+		"--action", "api.github.com/repos/The-17/agentsecrets/pulls/42",
 	)
 	if err != nil || exitCode != 0 {
-		t.Fatalf("verify root failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
+		t.Fatalf("verify failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
 	}
 
-	// 5. Verify root token failure (unauthorized capability)
-	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", rootToken,
-		"--capability", "github.issues.delete",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
-	)
-	if err != nil {
-		t.Fatalf("verify root capability error: %v", err)
-	}
-	if exitCode != 2 {
-		t.Fatalf("expected policy violation exit code 2, got %d. stderr=%s", exitCode, stderr)
-	}
-	var errPayload map[string]string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &errPayload); err != nil {
-		t.Fatalf("expected JSON error response on stderr, got: %s. error: %v", stderr, err)
-	}
-	if errPayload["error"] != "sec_policy_violation" {
-		t.Errorf("expected error type 'sec_policy_violation', got %q", errPayload["error"])
-	}
-
-	// 6. Sign child contract using the session key, marked as delegated, pointing to rootJTI
-	stdout, stderr, exitCode, err = runSec(tempHome, "sign",
-		"--kid", "session",
-		"--objective", "child delegation task",
-		"--allow", "github.issues.read",
-		"--deny", "github.issues.delete",
-		"--audience", "github",
-		"--ttl", "2m",
-		"--delegated",
-		"--parent-jti", rootJTI,
-	)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("sign child failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
-	}
-	childToken := strings.TrimSpace(stdout)
-
-	// Build the token chain: child_token..root_token
-	tokenChain := fmt.Sprintf("%s..%s", childToken, rootToken)
-
-	// 7. Verify the delegation chain successfully
-	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", tokenChain,
-		"--capability", "github.issues.read",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
-	)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("verify delegation chain failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
-	}
-	
 	var verifiedContract contract.SECContract
 	if err := json.Unmarshal([]byte(stdout), &verifiedContract); err != nil {
-		t.Fatalf("expected verified contract on stdout: %v, stdout=%s", err, stdout)
+		t.Fatalf("failed to parse verified contract JSON output: %v", err)
 	}
-	if verifiedContract.Objective != "child delegation task" {
-		t.Errorf("expected leaf objective, got %q", verifiedContract.Objective)
+	if verifiedContract.Objective != "summarise open pulls" {
+		t.Errorf("expected objective 'summarise open pulls', got %q", verifiedContract.Objective)
 	}
 
-	// 8. Verify the delegation chain escalation failure (child attempts github.issues.write which is in root but child only allows read)
+	// 4. Verify policy violation (unauthorized action)
+	// We need a fresh token because the first one has already been marked as used (replayed)
+	stdout, stderr, exitCode, err = runSec(tempHome, "sign",
+		"--objective", "summarise open pulls",
+		"--allow", "api.github.com/repos/The-17/agentsecrets/pulls*",
+		"--ttl", "5m",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("sign second token failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
+	}
+	token2 := strings.TrimSpace(stdout)
+
 	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", tokenChain,
-		"--capability", "github.issues.write",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
+		"--token", token2,
+		"--action", "api.stripe.com/v1/transfers",
 	)
 	if err != nil {
-		t.Fatalf("verify delegation chain error: %v", err)
+		t.Fatalf("verify command error: %v", err)
 	}
 	if exitCode != 2 {
-		t.Fatalf("expected policy violation exit code 2, got %d. stderr=%s", exitCode, stderr)
+		t.Fatalf("expected exit code 2 (policy violation), got %d. stderr=%s", exitCode, stderr)
 	}
 
-	// 9. Verify invalid signature on token chain
-	tamperedChain := tokenChain + "extraBytes"
-	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", tamperedChain,
-		"--capability", "github.issues.read",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
-	)
-	if err != nil {
-		t.Fatalf("verify tampered chain error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Fatalf("expected crypto error exit code 1, got %d. stderr=%s", exitCode, stderr)
-	}
+	var errPayload map[string]interface{}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &errPayload); err != nil {
 		t.Fatalf("expected JSON error response on stderr, got: %s. error: %v", stderr, err)
 	}
-	if errPayload["error"] != "sec_crypto_error" {
-		t.Errorf("expected error type 'sec_crypto_error', got %q", errPayload["error"])
+	if errPayload["error"] != "SEC_ACTION_NOT_PERMITTED" {
+		t.Errorf("expected error code SEC_ACTION_NOT_PERMITTED, got %q", errPayload["error"])
 	}
 
-	// 10. Test token-file verification
-	tokenFile := filepath.Join(tempHome, "chain.token")
-	if err := os.WriteFile(tokenFile, []byte(tokenChain), 0600); err != nil {
-		t.Fatalf("failed to write chain token to file: %v", err)
-	}
+	// 5. Verify replay protection (first verification records the JTI, second verification on same store should fail)
+	// Note: runSec above verified the token once. Since we run in the same homeDir environment,
+	// the JTI store persists in tempHome/.sec/jti.db.
+	// So doing a new verify command on the same token should fail!
 	stdout, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token-file", tokenFile,
-		"--capability", "github.issues.read",
-		"--resource", "The-17/agentsecrets",
-		"--audience", "github",
-	)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("verify token-file failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
-	}
-
-	// 11. Test replay protection of single_use token using E2E cli verification
-	// First, sign a single_use token
-	stdout, stderr, exitCode, err = runSec(tempHome, "sign",
-		"--objective", "single use test",
-		"--allow", "github.issues.read",
-		"--audience", "github",
-		"--replay", "single_use",
-	)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("sign single_use failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
-	}
-	singleUseToken := strings.TrimSpace(stdout)
-
-	// Verify first time: success
-	_, _, exitCode, err = runSec(tempHome, "verify",
-		"--token", singleUseToken,
-		"--capability", "github.issues.read",
-		"--audience", "github",
-	)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("first verify of single_use token failed: %v, exitCode=%d", err, exitCode)
-	}
-
-	// Verify second time: fails with crypto error (replay rejection)
-	_, stderr, exitCode, err = runSec(tempHome, "verify",
-		"--token", singleUseToken,
-		"--capability", "github.issues.read",
-		"--audience", "github",
+		"--token", token,
+		"--action", "api.github.com/repos/The-17/agentsecrets/pulls/42",
 	)
 	if err != nil {
-		t.Fatalf("second verify error: %v", err)
+		t.Fatalf("verify command error: %v", err)
 	}
 	if exitCode != 1 {
-		t.Fatalf("expected replay rejection exit code 1 (crypto error), got %d. stderr=%s", exitCode, stderr)
+		t.Fatalf("expected exit code 1 (replay rejected), got %d. stderr=%s", exitCode, stderr)
 	}
-	if !strings.Contains(stderr, "replay rejected") {
-		t.Errorf("expected error message to contain 'replay rejected', got: %s", stderr)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &errPayload); err != nil {
+		t.Fatalf("expected JSON error response on stderr, got: %s", stderr)
+	}
+	if errPayload["error"] != "SEC_TOKEN_REPLAYED" {
+		t.Errorf("expected error type SEC_TOKEN_REPLAYED, got %q", errPayload["error"])
+	}
+
+	// 6. Test CLI status subcommand
+	stdout, stderr, exitCode, err = runSec(tempHome, "status")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("status command failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "Initialized:   Yes") {
+		t.Errorf("expected status output to show Initialized: Yes, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Active JTIs:   2") {
+		t.Errorf("expected status output to show Active JTIs: 2, got:\n%s", stdout)
 	}
 }
 
@@ -326,7 +219,6 @@ func TestCLI_SignOutFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempHome)
 
-	// Initialize
 	_, _, exitCode, err := runSec(tempHome, "init")
 	if err != nil || exitCode != 0 {
 		t.Fatalf("init failed: %v, exitCode=%d", err, exitCode)
@@ -334,18 +226,15 @@ func TestCLI_SignOutFile(t *testing.T) {
 
 	tokenFile := filepath.Join(tempHome, "signed.token")
 
-	// Sign with --out
 	stdout, stderr, exitCode, err := runSec(tempHome, "sign",
 		"--objective", "out file test",
-		"--allow", "github.issues.read",
-		"--audience", "github",
+		"--allow", "api.github.com/repos/*",
 		"--out", tokenFile,
 	)
 	if err != nil || exitCode != 0 {
 		t.Fatalf("sign with --out failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
 	}
 
-	// Verify token was written to file
 	if _, err := os.Stat(tokenFile); os.IsNotExist(err) {
 		t.Fatalf("expected token file to exist at %s", tokenFile)
 	}
@@ -372,7 +261,6 @@ func TestCLI_MissingRequiredFlags(t *testing.T) {
 	// Sign with missing allow
 	_, stderr, exitCode, err := runSec(tempHome, "sign",
 		"--objective", "missing allow test",
-		"--audience", "github",
 	)
 	if err != nil {
 		t.Fatalf("sign command error: %v", err)
@@ -386,8 +274,7 @@ func TestCLI_MissingRequiredFlags(t *testing.T) {
 
 	// Sign with missing objective
 	_, stderr, exitCode, err = runSec(tempHome, "sign",
-		"--allow", "github.issues.read",
-		"--audience", "github",
+		"--allow", "api.github.com/repos/*",
 	)
 	if err != nil {
 		t.Fatalf("sign command error: %v", err)
@@ -398,21 +285,6 @@ func TestCLI_MissingRequiredFlags(t *testing.T) {
 	if !strings.Contains(stderr, "objective is required") {
 		t.Errorf("expected stderr to contain 'objective is required', got %q", stderr)
 	}
-
-	// Sign with missing audience
-	_, stderr, exitCode, err = runSec(tempHome, "sign",
-		"--objective", "missing aud test",
-		"--allow", "github.issues.read",
-	)
-	if err != nil {
-		t.Fatalf("sign command error: %v", err)
-	}
-	if exitCode != 1 {
-		t.Fatalf("expected exit code 1 for missing required flags, got %d", exitCode)
-	}
-	if !strings.Contains(stderr, "audience is required") {
-		t.Errorf("expected stderr to contain 'audience is required', got %q", stderr)
-	}
 }
 
 func TestCLI_InvalidExpiry(t *testing.T) {
@@ -422,7 +294,6 @@ func TestCLI_InvalidExpiry(t *testing.T) {
 	}
 	defer os.RemoveAll(tempHome)
 
-	// Initialize
 	_, _, exitCode, err := runSec(tempHome, "init")
 	if err != nil || exitCode != 0 {
 		t.Fatalf("init failed: %v", err)
@@ -431,8 +302,7 @@ func TestCLI_InvalidExpiry(t *testing.T) {
 	// Sign with invalid ttl
 	_, stderr, exitCode, err := runSec(tempHome, "sign",
 		"--objective", "expiry test",
-		"--allow", "github.issues.read",
-		"--audience", "github",
+		"--allow", "api.github.com/repos/*",
 		"--ttl", "invalid-ttl",
 	)
 	if err != nil {
@@ -448,8 +318,7 @@ func TestCLI_InvalidExpiry(t *testing.T) {
 	// Sign with short TTL token
 	stdout, _, exitCode, err := runSec(tempHome, "sign",
 		"--objective", "expired token test",
-		"--allow", "github.issues.read",
-		"--audience", "github",
+		"--allow", "api.github.com/repos/*",
 		"--ttl", "1s",
 	)
 	if err != nil || exitCode != 0 {
@@ -463,16 +332,20 @@ func TestCLI_InvalidExpiry(t *testing.T) {
 	// Verify expired token
 	_, stderr, exitCode, err = runSec(tempHome, "verify",
 		"--token", expiredToken,
-		"--capability", "github.issues.read",
-		"--audience", "github",
+		"--action", "api.github.com/repos/The-17/agentsecrets",
 	)
 	if err != nil {
 		t.Fatalf("verify command error: %v", err)
 	}
 	if exitCode != 1 {
-		t.Fatalf("expected crypto error exit code 1 for expired token, got %d", exitCode)
+		t.Fatalf("expected exit code 1 for expired token, got %d", exitCode)
 	}
-	if !strings.Contains(stderr, "has expired") {
-		t.Errorf("expected stderr to contain 'has expired', got %q", stderr)
+
+	var errPayload map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &errPayload); err != nil {
+		t.Fatalf("expected JSON error response on stderr, got: %s", stderr)
+	}
+	if errPayload["error"] != "SEC_TOKEN_EXPIRED" {
+		t.Errorf("expected error type SEC_TOKEN_EXPIRED, got %q", errPayload["error"])
 	}
 }

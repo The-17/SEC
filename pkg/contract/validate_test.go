@@ -4,227 +4,183 @@ import (
 	"testing"
 )
 
-func TestMatchCapability_ExactMatch(t *testing.T) {
-	if !MatchCapability("github.issues.read", "github.issues.read") {
-		t.Error("expected exact match to succeed")
-	}
-	if MatchCapability("github.issues.read", "github.issues.write") {
-		t.Error("expected different exact strings to fail")
-	}
-}
-
-func TestMatchCapability_UniversalWildcard(t *testing.T) {
-	if !MatchCapability("*", "anything.at.all") {
-		t.Error("universal wildcard should match everything")
-	}
-}
-
-func TestMatchCapability_SuffixWildcard(t *testing.T) {
-	// github.* should match all github capabilities at any depth
-	if !MatchCapability("github.*", "github.issues") {
-		t.Error("suffix wildcard should match single segment")
-	}
-	if !MatchCapability("github.*", "github.issues.read") {
-		t.Error("suffix wildcard should match multi-segment (hierarchical)")
-	}
-	if MatchCapability("github.*", "slack.messages") {
-		t.Error("suffix wildcard should not match different prefix")
-	}
-}
-
-func TestMatchCapability_MiddleWildcard(t *testing.T) {
-	// path.Match treats * as single-segment glob
-	if !MatchCapability("github.*.read", "github.issues.read") {
-		t.Error("middle wildcard should match single middle segment")
-	}
-	if MatchCapability("github.*.read", "github.issues.comments.read") {
-		t.Error("middle wildcard should not match multiple middle segments in path.Match mode")
-	}
-}
-
-func TestMatchCapability_PrefixWildcard(t *testing.T) {
-	if !MatchCapability("*.read", "github.read") {
-		t.Error("prefix wildcard should match single prefix segment")
-	}
-}
-
-func TestIsCapabilityAllowed_DenyOverridesAllow(t *testing.T) {
-	caps := []string{"github.*"}
-	denies := []string{"github.repositories.delete"}
-
-	if !IsCapabilityAllowed(caps, denies, "github.issues.read") {
-		t.Error("github.issues.read should be allowed")
-	}
-	if IsCapabilityAllowed(caps, denies, "github.repositories.delete") {
-		t.Error("github.repositories.delete should be denied even with github.* allow")
-	}
-}
-
-func TestIsCapabilityAllowed_DefaultDeny(t *testing.T) {
-	caps := []string{"github.issues.read"}
-	denies := []string{}
-
-	if IsCapabilityAllowed(caps, denies, "slack.messages.post") {
-		t.Error("unmatched capability should be denied by default")
-	}
-}
-
-func TestDefaultScopeValidator_ExactMatch(t *testing.T) {
-	v := &DefaultScopeValidator{}
-	scopes := map[string][]string{
-		"repositories": {"The-17/agentsecrets"},
-	}
-	if err := v.Validate(scopes, "repositories", "The-17/agentsecrets"); err != nil {
-		t.Errorf("exact scope match should pass: %v", err)
-	}
-}
-
-func TestDefaultScopeValidator_NoMatch(t *testing.T) {
-	v := &DefaultScopeValidator{}
-	scopes := map[string][]string{
-		"repositories": {"The-17/agentsecrets"},
-	}
-	if err := v.Validate(scopes, "repositories", "Evil-Org/malware"); err == nil {
-		t.Error("non-matching resource should fail scope validation")
-	}
-}
-
-func TestDefaultScopeValidator_UndefinedScopeKey(t *testing.T) {
-	v := &DefaultScopeValidator{}
-	scopes := map[string][]string{
-		"repositories": {"The-17/agentsecrets"},
-	}
-	// channels is not constrained — should pass
-	if err := v.Validate(scopes, "channels", "general"); err != nil {
-		t.Errorf("unconstrained scope key should pass: %v", err)
-	}
-}
-
-func TestDefaultScopeValidator_PrefixWildcard(t *testing.T) {
-	v := &DefaultScopeValidator{}
-	scopes := map[string][]string{
-		"repositories": {"The-17/*"},
-	}
-	if err := v.Validate(scopes, "repositories", "The-17/agentsecrets"); err != nil {
-		t.Errorf("prefix wildcard scope should pass: %v", err)
-	}
-	if err := v.Validate(scopes, "repositories", "Evil-Org/malware"); err == nil {
-		t.Error("prefix wildcard should not match different org")
-	}
-}
-
-func TestValidateDelegationBounds_Valid(t *testing.T) {
-	parent := &SECContract{
-		JTI:          "parent-001",
-		EXP:          9999999999,
-		Capabilities: []string{"github.*"},
-		Denies:       []string{"github.repos.delete"},
-	}
-	child := &SECContract{
-		JTI:          "child-001",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-		EXP:          9999999998,
-		Capabilities: []string{"github.issues.read"},
-		Denies:       []string{"github.repos.delete"},
-	}
-	if err := ValidateDelegationBounds(parent, child); err != nil {
-		t.Errorf("valid delegation should pass: %v", err)
-	}
-}
-
-func TestValidateDelegationBounds_CapabilityEscalation(t *testing.T) {
-	parent := &SECContract{
-		JTI:          "parent-001",
-		EXP:          9999999999,
-		Capabilities: []string{"github.issues.read"},
-		Denies:       []string{},
-	}
-	child := &SECContract{
-		JTI:          "child-001",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-		EXP:          9999999998,
-		Capabilities: []string{"github.repos.delete"},
-		Denies:       []string{},
-	}
-	if err := ValidateDelegationBounds(parent, child); err == nil {
-		t.Error("child with escalated capabilities should fail delegation bounds")
-	}
-}
-
-func TestValidateDelegationBounds_ExpirationExceeded(t *testing.T) {
-	parent := &SECContract{
-		JTI:          "parent-001",
-		EXP:          1000,
-		Capabilities: []string{"github.*"},
-		Denies:       []string{},
-	}
-	child := &SECContract{
-		JTI:          "child-001",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-		EXP:          2000,
-		Capabilities: []string{"github.issues.read"},
-		Denies:       []string{},
-	}
-	if err := ValidateDelegationBounds(parent, child); err == nil {
-		t.Error("child with expiration exceeding parent should fail")
-	}
-}
-
-func TestValidateDelegationBounds_MissingInheritedDeny(t *testing.T) {
-	parent := &SECContract{
-		JTI:          "parent-001",
-		EXP:          9999999999,
-		Capabilities: []string{"github.*"},
-		Denies:       []string{"github.repos.delete"},
-	}
-	child := &SECContract{
-		JTI:          "child-001",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-		EXP:          9999999998,
-		Capabilities: []string{"github.issues.read"},
-		Denies:       []string{}, // missing inherited deny
-	}
-	if err := ValidateDelegationBounds(parent, child); err == nil {
-		t.Error("child missing inherited parent deny should fail")
-	}
-}
-
-func TestSECContract_Validate_ValidContract(t *testing.T) {
-	c := &SECContract{
-		JTI:          "test-001",
-		IAT:          1000,
-		EXP:          2000,
-		Objective:    "test",
-		Capabilities: []string{"github.issues.read"},
-		Audience:     []string{"github"},
-		ReplayMode:   "reusable",
-	}
-	if err := c.Validate(); err != nil {
-		t.Errorf("valid contract should pass: %v", err)
-	}
-}
-
-func TestSECContract_Validate_MissingFields(t *testing.T) {
+func TestMatchAction(t *testing.T) {
 	tests := []struct {
-		name string
-		c    SECContract
+		name    string
+		pattern string
+		action  string
+		want    bool
 	}{
-		{"missing JTI", SECContract{IAT: 1, EXP: 2, Objective: "x", Capabilities: []string{"a"}, Audience: []string{"b"}, ReplayMode: "reusable"}},
-		{"missing objective", SECContract{JTI: "x", IAT: 1, EXP: 2, Capabilities: []string{"a"}, Audience: []string{"b"}, ReplayMode: "reusable"}},
-		{"missing caps", SECContract{JTI: "x", IAT: 1, EXP: 2, Objective: "x", Audience: []string{"b"}, ReplayMode: "reusable"}},
-		{"missing audience", SECContract{JTI: "x", IAT: 1, EXP: 2, Objective: "x", Capabilities: []string{"a"}, ReplayMode: "reusable"}},
-		{"missing replay", SECContract{JTI: "x", IAT: 1, EXP: 2, Objective: "x", Capabilities: []string{"a"}, Audience: []string{"b"}}},
-		{"exp before iat", SECContract{JTI: "x", IAT: 2, EXP: 1, Objective: "x", Capabilities: []string{"a"}, Audience: []string{"b"}, ReplayMode: "reusable"}},
-		{"bounded without max_uses", SECContract{JTI: "x", IAT: 1, EXP: 2, Objective: "x", Capabilities: []string{"a"}, Audience: []string{"b"}, ReplayMode: "bounded"}},
+		// Exact matches
+		{"exact match success", "api.github.com/repos/The-17/agentsecrets/pulls", "api.github.com/repos/The-17/agentsecrets/pulls", true},
+		{"exact match fail", "api.github.com/repos/The-17/agentsecrets/pulls", "api.github.com/repos/The-17/agentsecrets/issues", false},
+		{"exact match no protocol", "api.github.com/repos", "https://api.github.com/repos", true},
+
+		// Single segment wildcards (*)
+		{"single segment wildcard middle match", "api.github.com/repos/*/pulls", "api.github.com/repos/The-17/pulls", true},
+		{"single segment wildcard middle no-match", "api.github.com/repos/*/pulls", "api.github.com/repos/The-17/sub/pulls", false},
+		{"single segment wildcard last match", "api.github.com/repos/The-17/*", "api.github.com/repos/The-17/agentsecrets", true},
+
+		// Trailing wildcards
+		{"trailing wildcard pulls*", "api.github.com/repos/The-17/agentsecrets/pulls*", "api.github.com/repos/The-17/agentsecrets/pulls", true},
+		{"trailing wildcard pulls* with suffix", "api.github.com/repos/The-17/agentsecrets/pulls*", "api.github.com/repos/The-17/agentsecrets/pulls/42", true},
+		{"trailing wildcard pulls* with nested", "api.github.com/repos/The-17/agentsecrets/pulls*", "api.github.com/repos/The-17/agentsecrets/pulls/42/comments", true},
+		{"trailing wildcard /* under org", "api.github.com/repos/The-17/*", "api.github.com/repos/The-17/agentsecrets/pulls", true},
+		{"trailing wildcard /* exact match of base", "api.github.com/repos/The-17/*", "api.github.com/repos/The-17/", true},
+		{"trailing wildcard /* does not match sibling", "api.github.com/repos/The-17/*", "api.github.com/repos/The-17-other", false},
+
+		// Protocol stripping
+		{"protocol strip pattern https", "https://api.github.com/repos/*", "api.github.com/repos/The-17", true},
+		{"protocol strip action https", "api.github.com/repos/*", "https://api.github.com/repos/The-17", true},
+		{"protocol strip both", "https://api.github.com/repos/*", "https://api.github.com/repos/The-17", true},
+		{"protocol strip http", "http://api.github.com/repos/*", "http://api.github.com/repos/The-17", true},
+
+		// Universal wildcard
+		{"universal wildcard matches single", "*", "github.list_pull_requests", true},
+		{"universal wildcard matches nested", "*", "api.github.com/repos", true},
+
+		// Path traversal attempts in actions
+		{"path traversal escape", "api.github.com/repos/The-17/agentsecrets/*", "api.github.com/repos/The-17/agentsecrets/../../other-org/other-repo", false},
+		{"path traversal directory escape", "api.github.com/repos/The-17/agentsecrets/*", "api.github.com/repos/The-17/agentsecrets/..", false},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.c.Validate(); err == nil {
-				t.Errorf("expected validation to fail for %s", tt.name)
+			got := MatchAction(tt.pattern, tt.action)
+			if got != tt.want {
+				t.Errorf("MatchAction(%q, %q) = %v; want %v", tt.pattern, tt.action, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsActionAllowed(t *testing.T) {
+	patterns := []string{
+		"api.github.com/repos/The-17/agentsecrets/pulls*",
+		"github.list_pull_requests",
+	}
+
+	if !IsActionAllowed(patterns, "api.github.com/repos/The-17/agentsecrets/pulls/42") {
+		t.Error("expected match on trailing wildcard pattern")
+	}
+	if !IsActionAllowed(patterns, "github.list_pull_requests") {
+		t.Error("expected match on exact pattern")
+	}
+	if IsActionAllowed(patterns, "api.github.com/repos/The-17/agentsecrets/issues") {
+		t.Error("expected no match")
+	}
+}
+
+func TestSECContract_Validate(t *testing.T) {
+	validJTI := "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+
+	tests := []struct {
+		name    string
+		c       SECContract
+		wantErr bool
+	}{
+		{
+			name: "valid contract",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing JTI",
+			c: SECContract{
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid UUID JTI",
+			c: SECContract{
+				JTI:       "not-a-uuid",
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing objective",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "non-positive IAT",
+			c: SECContract{
+				JTI:       validJTI,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "non-positive EXP",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "EXP before IAT",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716682000,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty Allowed list",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty pattern in Allowed list",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"*", "  "},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.c.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
 			}
 		})
 	}

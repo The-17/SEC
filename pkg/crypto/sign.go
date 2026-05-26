@@ -46,12 +46,3 @@ func SignContract(c contract.SECContract, privateKey ed25519.PrivateKey) (string
 
 	return fmt.Sprintf("%s.%s", payloadB64, sigB64), nil
 }
-
-// BuildDelegatedToken creates a delegated token chain by concatenating a child
-// token with a parent token using the ".." (double-dot) separator.
-//
-// Token chain format: "child_payload.child_sig..parent_payload.parent_sig"
-// The verifier splits on ".." and validates from right (parent) to left (child).
-func BuildDelegatedToken(childToken, parentToken string) string {
-	return fmt.Sprintf("%s..%s", childToken, parentToken)
-}

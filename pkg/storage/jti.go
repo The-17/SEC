@@ -13,12 +13,7 @@ import (
 )
 
 // JTIStore manages replay protection state using a local SQLite database.
-// It tracks token usage for single_use and bounded replay modes.
-//
-// Concurrency safety:
-//   - WAL (Write-Ahead Logging) mode enables concurrent readers with a single writer.
-//   - busy_timeout prevents SQLITE_BUSY errors under parallel verification loads.
-//   - Expired record cleanup runs asynchronously to keep the hot path fast.
+// It tracks token usage to prevent reuse of signed contracts.
 type JTIStore struct {
 	db          *sql.DB
 	cleanupOnce sync.Once
@@ -55,14 +50,13 @@ func OpenJTIStore() (*JTIStore, error) {
 		}
 	}
 
-	// Create the schema
+	// Create the schema conforming to Spec v4.0
 	schema := `
 	CREATE TABLE IF NOT EXISTS used_jtis (
 		jti  TEXT PRIMARY KEY,
-		exp  INTEGER NOT NULL,
-		uses INTEGER NOT NULL DEFAULT 1
+		exp  INTEGER NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_used_jtis_exp ON used_jtis(exp);
+	CREATE INDEX IF NOT EXISTS idx_exp ON used_jtis(exp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -79,17 +73,9 @@ func OpenJTIStore() (*JTIStore, error) {
 	return store, nil
 }
 
-// CheckAndRecord validates and records a token's JTI based on its replay mode.
-//
-// Behavior by mode:
-//   - "reusable":   Always passes (no tracking needed).
-//   - "single_use": Fails if the JTI has been seen before. Records it on first use.
-//   - "bounded":    Fails if usage count has reached max_uses. Increments counter.
-func (s *JTIStore) CheckAndRecord(jti string, exp int64, mode string, maxUses int) error {
-	if mode == "reusable" {
-		return nil
-	}
-
+// CheckAndRecord validates and records a token's JTI.
+// Returns an error if the JTI has been seen before (replay protection).
+func (s *JTIStore) CheckAndRecord(jti string, exp int64) error {
 	// Use a transaction for atomicity under concurrent access
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -97,12 +83,12 @@ func (s *JTIStore) CheckAndRecord(jti string, exp int64, mode string, maxUses in
 	}
 	defer tx.Rollback()
 
-	var uses int
-	err = tx.QueryRow("SELECT uses FROM used_jtis WHERE jti = ?", jti).Scan(&uses)
+	var existingJTI string
+	err = tx.QueryRow("SELECT jti FROM used_jtis WHERE jti = ?", jti).Scan(&existingJTI)
 
 	if err == sql.ErrNoRows {
 		// First use — insert the record
-		_, err = tx.Exec("INSERT INTO used_jtis (jti, exp, uses) VALUES (?, ?, 1)", jti, exp)
+		_, err = tx.Exec("INSERT INTO used_jtis (jti, exp) VALUES (?, ?)", jti, exp)
 		if err != nil {
 			return fmt.Errorf("failed to record JTI: %w", err)
 		}
@@ -112,24 +98,8 @@ func (s *JTIStore) CheckAndRecord(jti string, exp int64, mode string, maxUses in
 		return fmt.Errorf("failed to query JTI: %w", err)
 	}
 
-	// JTI exists — evaluate based on mode
-	switch mode {
-	case "single_use":
-		return fmt.Errorf("replay rejected: token %s has already been used (single_use)", jti)
-
-	case "bounded":
-		if uses >= maxUses {
-			return fmt.Errorf("replay rejected: token %s has reached max uses (%d/%d)", jti, uses, maxUses)
-		}
-		_, err = tx.Exec("UPDATE used_jtis SET uses = uses + 1 WHERE jti = ?", jti)
-		if err != nil {
-			return fmt.Errorf("failed to increment JTI usage: %w", err)
-		}
-		return tx.Commit()
-
-	default:
-		return fmt.Errorf("unknown replay mode %q for existing JTI", mode)
-	}
+	// JTI exists — replay detected
+	return fmt.Errorf("replay rejected: token %s has already been used", jti)
 }
 
 // cleanupExpired removes expired JTI records from the database.
@@ -145,4 +115,14 @@ func (s *JTIStore) Close() error {
 		return s.db.Close()
 	}
 	return nil
+}
+
+// GetRecordCount returns the total number of records in the JTI store.
+func (s *JTIStore) GetRecordCount() (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM used_jtis").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count JTI records: %w", err)
+	}
+	return count, nil
 }

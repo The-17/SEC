@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +11,7 @@ import (
 	"sec/pkg/storage"
 )
 
-// setupTestKeys generates an ephemeral keypair for testing without touching ~/.sec/
+// setupTestKeys generates an ephemeral keypair for testing
 func setupTestKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -24,15 +23,12 @@ func setupTestKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func makeTestContract(overrides ...func(*contract.SECContract)) contract.SECContract {
 	c := contract.SECContract{
-		JTI:          "test-jti-001",
-		IAT:          time.Now().Unix(),
-		EXP:          time.Now().Add(10 * time.Minute).Unix(),
-		Objective:    "unit test",
-		Capabilities: []string{"github.issues.read", "github.pull_requests.comment"},
-		Denies:       []string{"github.repositories.delete"},
-		Scopes:       map[string][]string{"repositories": {"The-17/agentsecrets"}},
-		Audience:     []string{"github"},
-		ReplayMode:   "reusable",
+		JTI:       "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+		KID:       "default",
+		IAT:       time.Now().Unix(),
+		EXP:       time.Now().Add(10 * time.Minute).Unix(),
+		Objective: "unit test",
+		Allowed:   []string{"api.github.com/repos/The-17/agentsecrets/pulls*"},
 	}
 	for _, o := range overrides {
 		o(&c)
@@ -49,13 +45,10 @@ func TestSignAndVerify_RoundTrip(t *testing.T) {
 		t.Fatalf("sign failed: %v", err)
 	}
 
-	verified, err := VerifyContractChain(VerifyRequest{
-		TokenChain: token,
+	verified, err := VerifyContract(VerifyRequest{
+		Token:      token,
+		Action:     "api.github.com/repos/The-17/agentsecrets/pulls/42",
 		RootPubKey: pub,
-		Capability: "github.issues.read",
-		Resource:   "The-17/agentsecrets",
-		ScopeKey:   "repositories",
-		Audience:   "github",
 	})
 	if err != nil {
 		t.Fatalf("verify failed: %v", err)
@@ -69,7 +62,7 @@ func TestSignAndVerify_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestVerify_DeniedCapability(t *testing.T) {
+func TestVerify_UnauthorizedAction(t *testing.T) {
 	pub, priv := setupTestKeys(t)
 	c := makeTestContract()
 
@@ -78,92 +71,21 @@ func TestVerify_DeniedCapability(t *testing.T) {
 		t.Fatalf("sign failed: %v", err)
 	}
 
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
+	_, err = VerifyContract(VerifyRequest{
+		Token:      token,
+		Action:     "api.stripe.com/v1/transfers",
 		RootPubKey: pub,
-		Capability: "github.repositories.delete",
-		Audience:   "github",
 	})
 	if err == nil {
-		t.Fatal("expected verification to fail for denied capability")
+		t.Fatal("expected verification to fail for unauthorized action")
 	}
 
 	ve, ok := err.(*VerificationError)
 	if !ok {
 		t.Fatalf("expected VerificationError, got %T", err)
 	}
-	if !ve.IsPolicy {
-		t.Error("denied capability should be a policy error (exit code 2)")
-	}
-}
-
-func TestVerify_UnauthorizedCapability(t *testing.T) {
-	pub, priv := setupTestKeys(t)
-	c := makeTestContract()
-
-	token, err := SignContract(c, priv)
-	if err != nil {
-		t.Fatalf("sign failed: %v", err)
-	}
-
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
-		RootPubKey: pub,
-		Capability: "stripe.charges.create",
-		Audience:   "github",
-	})
-	if err == nil {
-		t.Fatal("expected verification to fail for unauthorized capability")
-	}
-}
-
-func TestVerify_WrongAudience(t *testing.T) {
-	pub, priv := setupTestKeys(t)
-	c := makeTestContract()
-
-	token, err := SignContract(c, priv)
-	if err != nil {
-		t.Fatalf("sign failed: %v", err)
-	}
-
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
-		RootPubKey: pub,
-		Capability: "github.issues.read",
-		Audience:   "slack",
-	})
-	if err == nil {
-		t.Fatal("expected verification to fail for wrong audience")
-	}
-
-	ve, ok := err.(*VerificationError)
-	if !ok {
-		t.Fatalf("expected VerificationError, got %T", err)
-	}
-	if !ve.IsPolicy {
-		t.Error("audience mismatch should be a policy error")
-	}
-}
-
-func TestVerify_ScopeMismatch(t *testing.T) {
-	pub, priv := setupTestKeys(t)
-	c := makeTestContract()
-
-	token, err := SignContract(c, priv)
-	if err != nil {
-		t.Fatalf("sign failed: %v", err)
-	}
-
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
-		RootPubKey: pub,
-		Capability: "github.issues.read",
-		Resource:   "Evil-Org/malware",
-		ScopeKey:   "repositories",
-		Audience:   "github",
-	})
-	if err == nil {
-		t.Fatal("expected verification to fail for scope mismatch")
+	if ve.Code != "SEC_ACTION_NOT_PERMITTED" {
+		t.Errorf("expected error code SEC_ACTION_NOT_PERMITTED, got %q", ve.Code)
 	}
 }
 
@@ -179,8 +101,9 @@ func TestVerify_ExpiredToken(t *testing.T) {
 		t.Fatalf("sign failed: %v", err)
 	}
 
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
+	_, err = VerifyContract(VerifyRequest{
+		Token:      token,
+		Action:     "api.github.com/repos/The-17/agentsecrets/pulls/42",
 		RootPubKey: pub,
 	})
 	if err == nil {
@@ -191,8 +114,8 @@ func TestVerify_ExpiredToken(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected VerificationError, got %T", err)
 	}
-	if ve.IsPolicy {
-		t.Error("expired token should be a crypto error (exit code 1), not policy")
+	if ve.Code != "SEC_TOKEN_EXPIRED" {
+		t.Errorf("expected error code SEC_TOKEN_EXPIRED, got %q", ve.Code)
 	}
 }
 
@@ -205,21 +128,29 @@ func TestVerify_TamperedSignature(t *testing.T) {
 		t.Fatalf("sign failed: %v", err)
 	}
 
-	// Tamper with the last character of the signature
-	tampered := token[:len(token)-1] + "X"
+	// Tamper with the last few characters of the signature to ensure bits change
+	tampered := token[:len(token)-5] + "XXXXX"
 
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: tampered,
+	_, err = VerifyContract(VerifyRequest{
+		Token:      tampered,
+		Action:     "api.github.com/repos/The-17/agentsecrets/pulls/42",
 		RootPubKey: pub,
 	})
 	if err == nil {
 		t.Fatal("expected verification to fail for tampered signature")
 	}
+
+	ve, ok := err.(*VerificationError)
+	if !ok {
+		t.Fatalf("expected VerificationError, got %T", err)
+	}
+	if ve.Code != "SEC_INVALID_SIGNATURE" {
+		t.Errorf("expected error code SEC_INVALID_SIGNATURE, got %q", ve.Code)
+	}
 }
 
-func TestVerify_WrongKey(t *testing.T) {
-	_, priv := setupTestKeys(t)
-	otherPub, _ := setupTestKeys(t)
+func TestVerify_ReplayProtection(t *testing.T) {
+	pub, priv := setupTestKeys(t)
 	c := makeTestContract()
 
 	token, err := SignContract(c, priv)
@@ -227,123 +158,6 @@ func TestVerify_WrongKey(t *testing.T) {
 		t.Fatalf("sign failed: %v", err)
 	}
 
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: token,
-		RootPubKey: otherPub,
-	})
-	if err == nil {
-		t.Fatal("expected verification to fail with wrong public key")
-	}
-}
-
-func TestVerify_DelegationChain(t *testing.T) {
-	// Root keypair (used to sign the parent contract)
-	rootPub, rootPriv := setupTestKeys(t)
-
-	// Session keypair (parent declares spk, uses session priv to sign child)
-	sessionPub, sessionPriv := setupTestKeys(t)
-	sessionPubB64 := base64.RawURLEncoding.EncodeToString(sessionPub)
-
-	parentContract := makeTestContract(func(c *contract.SECContract) {
-		c.JTI = "parent-001"
-		c.Capabilities = []string{"github.*"}
-		c.Denies = []string{"github.repos.delete"}
-		c.SessionPubKey = sessionPubB64
-	})
-
-	parentToken, err := SignContract(parentContract, rootPriv)
-	if err != nil {
-		t.Fatalf("failed to sign parent: %v", err)
-	}
-
-	childContract := contract.SECContract{
-		JTI:          "child-001",
-		IAT:          time.Now().Unix(),
-		EXP:          time.Now().Add(5 * time.Minute).Unix(),
-		Objective:    "read issues only",
-		Capabilities: []string{"github.issues.read"},
-		Denies:       []string{"github.repos.delete"},
-		Scopes:       map[string][]string{"repositories": {"The-17/agentsecrets"}},
-		Audience:     []string{"github"},
-		ReplayMode:   "reusable",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-	}
-
-	childToken, err := SignContract(childContract, sessionPriv)
-	if err != nil {
-		t.Fatalf("failed to sign child: %v", err)
-	}
-
-	chain := BuildDelegatedToken(childToken, parentToken)
-
-	verified, err := VerifyContractChain(VerifyRequest{
-		TokenChain: chain,
-		RootPubKey: rootPub,
-		Capability: "github.issues.read",
-		Resource:   "The-17/agentsecrets",
-		ScopeKey:   "repositories",
-		Audience:   "github",
-	})
-	if err != nil {
-		t.Fatalf("delegation chain verification failed: %v", err)
-	}
-	if verified.JTI != "child-001" {
-		t.Errorf("expected leaf contract JTI child-001, got %s", verified.JTI)
-	}
-}
-
-func TestVerify_DelegationChain_Escalation(t *testing.T) {
-	rootPub, rootPriv := setupTestKeys(t)
-	sessionPub, sessionPriv := setupTestKeys(t)
-	sessionPubB64 := base64.RawURLEncoding.EncodeToString(sessionPub)
-
-	parentContract := makeTestContract(func(c *contract.SECContract) {
-		c.JTI = "parent-001"
-		c.Capabilities = []string{"github.issues.read"}
-		c.Denies = []string{}
-		c.SessionPubKey = sessionPubB64
-	})
-
-	parentToken, err := SignContract(parentContract, rootPriv)
-	if err != nil {
-		t.Fatalf("failed to sign parent: %v", err)
-	}
-
-	// Child tries to escalate beyond parent
-	childContract := contract.SECContract{
-		JTI:          "child-001",
-		IAT:          time.Now().Unix(),
-		EXP:          time.Now().Add(5 * time.Minute).Unix(),
-		Objective:    "evil escalation",
-		Capabilities: []string{"github.repos.delete"},
-		Denies:       []string{},
-		Scopes:       map[string][]string{},
-		Audience:     []string{"github"},
-		ReplayMode:   "reusable",
-		Delegated:    true,
-		ParentJTI:    "parent-001",
-	}
-
-	childToken, err := SignContract(childContract, sessionPriv)
-	if err != nil {
-		t.Fatalf("failed to sign child: %v", err)
-	}
-
-	chain := BuildDelegatedToken(childToken, parentToken)
-
-	_, err = VerifyContractChain(VerifyRequest{
-		TokenChain: chain,
-		RootPubKey: rootPub,
-		Capability: "github.repos.delete",
-		Audience:   "github",
-	})
-	if err == nil {
-		t.Fatal("expected escalation attempt to fail")
-	}
-}
-
-func TestReplay_SingleUse(t *testing.T) {
 	// Set up a temp SQLite database
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "jti_test.db")
@@ -356,68 +170,56 @@ func TestReplay_SingleUse(t *testing.T) {
 	}
 	defer store.Close()
 
-	jti := "single-use-test-001"
-	exp := time.Now().Add(10 * time.Minute).Unix()
-
-	// First use should succeed
-	if err := store.CheckAndRecord(jti, exp, "single_use", 0); err != nil {
-		t.Fatalf("first use should succeed: %v", err)
+	// First verify: success
+	_, err = VerifyContract(VerifyRequest{
+		Token:      token,
+		Action:     "api.github.com/repos/The-17/agentsecrets/pulls/42",
+		RootPubKey: pub,
+		JTIStore:   store,
+	})
+	if err != nil {
+		t.Fatalf("first verification failed: %v", err)
 	}
 
-	// Second use should fail
-	if err := store.CheckAndRecord(jti, exp, "single_use", 0); err == nil {
-		t.Fatal("second use of single_use token should fail")
+	// Second verify: failure (replay)
+	_, err = VerifyContract(VerifyRequest{
+		Token:      token,
+		Action:     "api.github.com/repos/The-17/agentsecrets/pulls/42",
+		RootPubKey: pub,
+		JTIStore:   store,
+	})
+	if err == nil {
+		t.Fatal("expected second verification to fail due to replay protection")
+	}
+
+	ve, ok := err.(*VerificationError)
+	if !ok {
+		t.Fatalf("expected VerificationError, got %T", err)
+	}
+	if ve.Code != "SEC_TOKEN_REPLAYED" {
+		t.Errorf("expected error code SEC_TOKEN_REPLAYED, got %q", ve.Code)
 	}
 }
 
-func TestReplay_Bounded(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "jti_test.db")
-	os.Setenv("SEC_DB_PATH_OVERRIDE", dbPath)
-	defer os.Unsetenv("SEC_DB_PATH_OVERRIDE")
-
-	store, err := storage.OpenJTIStore()
-	if err != nil {
-		t.Fatalf("failed to open JTI store: %v", err)
-	}
-	defer store.Close()
-
-	jti := "bounded-test-001"
-	exp := time.Now().Add(10 * time.Minute).Unix()
-	maxUses := 3
-
-	// Uses 1-3 should succeed
-	for i := 1; i <= maxUses; i++ {
-		if err := store.CheckAndRecord(jti, exp, "bounded", maxUses); err != nil {
-			t.Fatalf("use %d/%d should succeed: %v", i, maxUses, err)
-		}
+func TestValidateKID(t *testing.T) {
+	tests := []struct {
+		kid     string
+		wantErr bool
+	}{
+		{"default", false},
+		{"session-key-1", false},
+		{"key_2", false},
+		{"", true},
+		{"../default", true},
+		{"/etc/passwd", true},
+		{"default.key", true},
+		{"default!", true},
 	}
 
-	// Use 4 should fail
-	if err := store.CheckAndRecord(jti, exp, "bounded", maxUses); err == nil {
-		t.Fatal("exceeding max_uses should fail")
-	}
-}
-
-func TestReplay_Reusable(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "jti_test.db")
-	os.Setenv("SEC_DB_PATH_OVERRIDE", dbPath)
-	defer os.Unsetenv("SEC_DB_PATH_OVERRIDE")
-
-	store, err := storage.OpenJTIStore()
-	if err != nil {
-		t.Fatalf("failed to open JTI store: %v", err)
-	}
-	defer store.Close()
-
-	jti := "reusable-test-001"
-	exp := time.Now().Add(10 * time.Minute).Unix()
-
-	// Should succeed indefinitely
-	for i := 0; i < 100; i++ {
-		if err := store.CheckAndRecord(jti, exp, "reusable", 0); err != nil {
-			t.Fatalf("reusable token should always succeed: %v", err)
+	for _, tt := range tests {
+		err := ValidateKID(tt.kid)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ValidateKID(%q) error = %v, wantErr = %v", tt.kid, err, tt.wantErr)
 		}
 	}
 }

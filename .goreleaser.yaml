@@ -1,0 +1,51 @@
+# GoReleaser configuration for SEC (v2 format)
+version: 2
+project_name: sec
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/sec
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    binary: sec
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+brews:
+  - name: sec
+    repository:
+      owner: The-17
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/The-17/sec"
+    description: "Signed Execution Contracts (SEC) capability sandbox for agents."
+    license: "MIT"
+    test: |
+      system "#{bin}/sec version"
