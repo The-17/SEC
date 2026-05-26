@@ -81,14 +81,40 @@ sec sign \
 ```
 *   **Success**: Outputs raw token string on `stdout` and exits `0`.
 *   **Error**: Outputs error description on `stderr` and exits `1`.
+*   **Optional Metadata**: Link contracts to audit logs by passing `--signer "orchestrator-v1"` and `--run-id "session-xyz"`.
 
 ### 3.2 Verifying an Action
-The credential gateway intercepts outbound requests and verifies them against the token:
+The credential gateway intercepts outbound requests and verifies them against the token. Actions can optionally include HTTP verb prefixes (e.g. `GET:` or `POST:`):
 ```bash
 sec verify \
   --token "$SEC_TOKEN" \
-  --action "api.github.com/repos/The-17/agentsecrets/pulls/12"
+  --action "GET:api.github.com/repos/The-17/agentsecrets/pulls/12"
 ```
+
+### 3.3 Revoking a Contract
+If an orchestrator detects a anomaly or finishes execution early, it can proactively revoke the contract to prevent future reuse:
+```bash
+# Revoke by extracting JTI from token file
+sec revoke --token-file my_token.sec
+
+# Revoke by raw JTI UUID
+sec revoke --jti "f4e4c89b-9125-4a55-8cc3-8ccf14978c55"
+```
+*   **Exit 0**: Contract successfully revoked (idempotent, returns 0 if already revoked).
+*   **Exit 1**: Invalid UUID format or database failure.
+
+### 3.4 Delegating a Contract
+In multi-agent orchestration, a main agent can derive restricted child contracts to pass down to sub-agents or tool runtimes. The child contract's allow list must be a strict subset of the parent's:
+```bash
+sec delegate \
+  --parent parent.sec \
+  --objective "read pull requests only" \
+  --allow "GET:api.github.com/repos/The-17/agentsecrets/pulls*" \
+  --ttl 5m \
+  --out child.sec
+```
+*   **Exit 0**: Child contract successfully signed and outputted.
+*   **Exit 1**: Child expiration exceeds parent, parent JTI mismatch, depth limit exceeded, or child's capabilities exceed the parent's.
 
 #### Exit Codes and Outputs
 
@@ -133,5 +159,8 @@ sec verify \
 1.  **Strict Glob Patterns**: Avoid using wide wildcards (e.g. `*` or `*.com/*`). Always scope the allow list patterns as narrowly as possible:
     *   *Bad*: `api.github.com/*`
     *   *Good*: `api.github.com/repos/The-17/agentsecrets/pulls*`
-2.  **Short-Lived Contracts (TTL)**: Match contract TTL with the expected execution time. A simple read task should have a TTL of `2m` to `5m`.
-3.  **Descriptive Objectives**: The `obj` field is the primary audit log that developers and human supervisors see when an attack triggers a policy violation (Exit 2). Make sure it describes the target task precisely (e.g. `Fetch customer subscription details` instead of `Run Stripe script`).
+2.  **Use HTTP Verb Restrictions**: Always prefix allow patterns with HTTP verbs when possible (e.g. `GET:api.github.com/repos/*`) to prevent writing/deletion escalation.
+3.  **Short-Lived Contracts (TTL)**: Match contract TTL with the expected execution time. A simple read task should have a TTL of `2m` to `5m`.
+4.  **Descriptive Objectives**: The `obj` field is the primary audit log that developers and human supervisors see when an attack triggers a policy violation (Exit 2). Make sure it describes the target task precisely (e.g. `Fetch customer subscription details` instead of `Run Stripe script`).
+5.  **Multi-agent Delegation Chain**: For recursive or multi-agent structures, use `sec delegate` to derive contracts for sub-agents with narrower scopes (e.g., passing a read-only child contract to a summarizer agent). Ensure you define a reasonable `--max-depth` at the parent level to prevent uncontrolled delegation chains.
+6.  **Audit Logs & Provenance**: Always populate `--signer` and `--run-id` in production. Store these fields alongside gateway logs (returned on Exit 0 verification) to maintain a tamper-proof audit trail mapping specific LLM sessions to executed API calls.

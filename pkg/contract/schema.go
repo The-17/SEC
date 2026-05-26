@@ -17,6 +17,10 @@ type SECContract struct {
 	EXP       int64    `json:"exp"`
 	Objective string   `json:"obj"`
 	Allowed   []string `json:"allow"`
+	ParentJTI string   `json:"parent_jti,omitempty"`
+	MaxDepth  *int     `json:"max_depth,omitempty"`
+	Signer    string   `json:"signer,omitempty"`
+	RunID     string   `json:"run_id,omitempty"`
 }
 
 // Validate performs structural validation of the contract fields.
@@ -48,8 +52,55 @@ func (c *SECContract) Validate() error {
 		if strings.TrimSpace(pattern) == "" {
 			return fmt.Errorf("allow list cannot contain empty patterns")
 		}
+		if err := checkVerbPrefix(pattern); err != nil {
+			return err
+		}
+	}
+	if c.ParentJTI != "" {
+		if _, err := uuid.Parse(c.ParentJTI); err != nil {
+			return fmt.Errorf("parent_jti must be a valid UUID: %w", err)
+		}
+	}
+	if c.MaxDepth != nil && *c.MaxDepth < 0 {
+		return fmt.Errorf("max_depth must be non-negative")
 	}
 	return nil
+}
+
+func checkVerbPrefix(pattern string) error {
+	idx := strings.Index(pattern, ":")
+	if idx == -1 {
+		return nil
+	}
+	if strings.HasPrefix(pattern[idx:], "://") {
+		return nil
+	}
+	prefix := pattern[:idx]
+	isAllLetters := true
+	for _, r := range prefix {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			isAllLetters = false
+			break
+		}
+	}
+	if !isAllLetters || len(prefix) == 0 {
+		return nil
+	}
+
+	upperPrefix := strings.ToUpper(prefix)
+	if upperPrefix == "HTTP" || upperPrefix == "HTTPS" {
+		return nil
+	}
+
+	if isValidVerb(upperPrefix) {
+		return nil
+	}
+
+	if idx+1 < len(pattern) && pattern[idx+1] >= '0' && pattern[idx+1] <= '9' {
+		return nil
+	}
+
+	return fmt.Errorf("invalid HTTP verb prefix %q in pattern %q", prefix, pattern)
 }
 
 // IsExpired checks whether the contract has passed its expiration time.

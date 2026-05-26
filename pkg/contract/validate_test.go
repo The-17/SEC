@@ -42,6 +42,17 @@ func TestMatchAction(t *testing.T) {
 		// Path traversal attempts in actions
 		{"path traversal escape", "api.github.com/repos/The-17/agentsecrets/*", "api.github.com/repos/The-17/agentsecrets/../../other-org/other-repo", false},
 		{"path traversal directory escape", "api.github.com/repos/The-17/agentsecrets/*", "api.github.com/repos/The-17/agentsecrets/..", false},
+
+		// HTTP Verb restrictions
+		{"verb restriction exact match", "GET:api.github.com/repos/*", "GET:api.github.com/repos/foo", true},
+		{"verb restriction mismatch", "GET:api.github.com/repos/*", "POST:api.github.com/repos/foo", false},
+		{"verb restriction action missing verb", "GET:api.github.com/repos/*", "api.github.com/repos/foo", false},
+		{"verb restriction pattern missing verb", "api.github.com/repos/*", "GET:api.github.com/repos/foo", true},
+		{"verb restriction both missing verb", "api.github.com/repos/*", "api.github.com/repos/foo", true},
+		{"verb restriction case insensitivity pattern", "get:api.github.com/repos/*", "GET:api.github.com/repos/foo", true},
+		{"verb restriction case insensitivity action", "GET:api.github.com/repos/*", "get:api.github.com/repos/foo", true},
+		{"verb restriction on port pattern", "GET:localhost:8080/*", "GET:localhost:8080/foo", true},
+		{"verb restriction on port pattern mismatch", "GET:localhost:8080/*", "POST:localhost:8080/foo", false},
 	}
 
 	for _, tt := range tests {
@@ -171,6 +182,50 @@ func TestSECContract_Validate(t *testing.T) {
 				EXP:       1716681900,
 				Objective: "test",
 				Allowed:   []string{"*", "  "},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid verb prefix",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"GET:api.github.com/*", "POST:api.stripe.com/transfers*"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid host with port",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"localhost:8080/foo/*"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid protocol prefix",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"https://api.github.com/*"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid verb prefix typo",
+			c: SECContract{
+				JTI:       validJTI,
+				IAT:       1716681600,
+				EXP:       1716681900,
+				Objective: "test",
+				Allowed:   []string{"GTE:api.github.com/*"},
 			},
 			wantErr: true,
 		},

@@ -1,4 +1,4 @@
-# Security Analysis & Threat Model (SEC v1.0)
+# Security Analysis & Threat Model (SEC v1.1)
 
 For security researchers, developers, and hackers deploying autonomous AI agents: this document details the security boundaries, cryptographic guarantees, and **honest structural limitations** of the Signed Execution Contracts (SEC) protocol. 
 
@@ -33,7 +33,7 @@ An attacker looking to compromise a system using SEC will not try to break Ed255
 ### 2.2 Allowed-Channel Exfiltration (Over-Privileged Allow Lists)
 *   **The Vector**: If a contract allows `api.github.com/repos/The-17/agentsecrets/pulls*`, the hijacked agent cannot delete repositories or call Stripe. However, it *can* exfiltrate sensitive environment variables or system secrets by writing them into a new GitHub Pull Request or issue comment on that specific repository.
 *   **The Reality**: **SEC blocks unauthorized destinations, not malicious content sent to authorized destinations.** If an endpoint is in the allow list, the agent has full write access (within standard HTTP limits) to that endpoint.
-*   **Mitigation Requirement**: Allow lists must be scoped to the absolute minimum path and query parameters (e.g., allowing specific query parameters or restricting methods if the proxy supports verb-level checks).
+*   **Mitigation Requirement**: Allow lists must be scoped to the absolute minimum path and query parameters, and enforce HTTP methods using verb-restricted patterns (e.g. `GET:api.github.com/*` which restricts access to read-only actions).
 
 ### 2.3 Side-Channel & Non-Credentialed Harm
 *   **The Vector**: An agent is hijacked and cannot call external credentialed APIs. However, the agent still has access to the local terminal, filesystem, and unauthenticated internal network endpoints (e.g., `http://localhost:5000` or local metadata endpoints like `169.254.169.254` on AWS). The hijacked agent deletes the local project directory, runs local fork-bombs, or poisons local databases.
@@ -50,6 +50,16 @@ An attacker looking to compromise a system using SEC will not try to break Ed255
     *   *Delayed verification*: Expired tokens being accepted if the proxy clock is behind.
     *   *Premature expiry*: Valid contracts failing verification due to clock drift (Denial of Service).
 *   **Mitigation Requirement**: Standard NTP synchronization must be maintained on both orchestrator and proxy nodes. TTLs should be tightly controlled (e.g., 2–5 minutes) to minimize the capture window.
+
+### 2.6 Delegation Chain Escalation (Unconstrained Child Contracts)
+*   **The Vector**: A sub-agent attempts to request a child contract with permissions that exceed or diverge from its parent contract, or attempts to extend its remaining execution lifetime.
+*   **The Reality**: **SEC v1.1 implements strict delegation validation.** The `sec delegate` command guarantees that child contracts are mathematically bounded by their parent: child expiration cannot exceed parent, and child patterns must be strict subsets of parent patterns (checked deterministically by replacing child wildcards with placeholders).
+*   **Mitigation Requirement**: If multi-agent delegation is used, integrators must enforce a `--max-depth` limit on the root contract to bound how deep sub-agents can propagate delegation.
+
+### 2.7 Local Revocation Synchronization
+*   **The Vector**: A contract is revoked via `sec revoke`, but a distributed verification gateway is not connected to the same JTI database.
+*   **The Reality**: **Revocation is local-only in v1.1.** JTI replay and revocation records are stored in a single SQLite database (`jti.db`). If your verifiers are running in distributed environments without a shared DB volume, revoked contracts will still be accepted on other nodes.
+*   **Mitigation Requirement**: Map the JTI SQLite database file to a shared network mount (or configure `SEC_DB_PATH_OVERRIDE` to point to a shared location) if distributed verification is required.
 
 ---
 

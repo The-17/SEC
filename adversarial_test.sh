@@ -145,6 +145,75 @@ else
 fi
 
 
+# 7. TEST: HTTP Verb Escalation Probe
+echo -n "[*] HTTP Verb Escalation Probe... "
+TOKEN_VERB1=$(./sec sign --objective "test verb 1" --allow "GET:api.github.com/repos/*" --ttl 5m)
+TOKEN_VERB2=$(./sec sign --objective "test verb 2" --allow "GET:api.github.com/repos/*" --ttl 5m)
+
+# Attempt to execute a POST action on a GET-only contract (consumes TOKEN_VERB1)
+./sec verify --token "$TOKEN_VERB1" --action "POST:api.github.com/repos/The-17/agentsecrets" 2>err.log || true
+if grep -q "SEC_ACTION_NOT_PERMITTED" err.log; then
+    # Verify that a GET action succeeds using TOKEN_VERB2
+    ./sec verify --token "$TOKEN_VERB2" --action "GET:api.github.com/repos/The-17/agentsecrets" >/dev/null 2>err.log || true
+    if [ ! -s err.log ]; then
+        echo "PASSED (Verb escalation blocked and valid verb permitted)"
+    else
+        echo "FAILED (Valid verb check failed). Log:"
+        cat err.log
+        exit 1
+    fi
+else
+    echo "FAILED (Verb escalation allowed). Log:"
+    cat err.log
+    exit 1
+fi
+
+
+# 8. TEST: Delegation Escalation Probe
+echo -n "[*] Delegation Escalation Probe... "
+parent_path="parent.sec"
+child_path="child.sec"
+./sec sign --objective "parent contract" --allow "GET:api.github.com/repos/*" --ttl 10m --out "$parent_path"
+
+# Attempt to delegate a child contract with escalatory POST permission
+./sec delegate --parent "$parent_path" --objective "child contract" --allow "POST:api.github.com/repos/The-17/agentsecrets" --out "$child_path" 2>err.log || true
+if grep -q "delegation error" err.log; then
+    # Verify that valid delegation succeeds
+    if ./sec delegate --parent "$parent_path" --objective "child contract" --allow "GET:api.github.com/repos/The-17/agentsecrets" --out "$child_path" 2>err.log; then
+        echo "PASSED (Delegation escalation blocked and valid delegation allowed)"
+    else
+        echo "FAILED (Valid delegation check failed). Log:"
+        cat err.log
+        exit 1
+    fi
+else
+    echo "FAILED (Delegation escalation allowed). Log:"
+    cat err.log
+    exit 1
+fi
+rm -f "$parent_path" "$child_path"
+
+
+# 9. TEST: Proactive Revocation Probe
+echo -n "[*] Proactive Revocation Probe... "
+TOKEN_REVOKE=$(./sec sign --objective "test revocation" --allow "api.github.com/repos/*" --ttl 5m)
+echo "$TOKEN_REVOKE" > token.sec
+
+# Revoke the contract
+./sec revoke --token-file token.sec >/dev/null
+
+# Attempt to verify an action using the revoked contract
+./sec verify --token "$TOKEN_REVOKE" --action "api.github.com/repos/The-17/agentsecrets" 2>err.log || true
+if grep -q "SEC_TOKEN_REPLAYED" err.log; then
+    echo "PASSED (Revoked contract rejected securely)"
+else
+    echo "FAILED (Revoked contract accepted). Log:"
+    cat err.log
+    exit 1
+fi
+rm -f token.sec err.log
+
+
 echo "=========================================================="
 echo "   ALL ADVERSARIAL SECURITY CHECKS PASSED SUCCESSFULLY    "
 echo "=========================================================="

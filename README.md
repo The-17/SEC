@@ -182,9 +182,11 @@ sec sign [flags]
 Generates a signed execution token base64url string.
 *   **Flags**:
 	*   `--objective`: (Required) Human objective string.
-	*   `--allow`: (Required) Comma-separated list of allowed glob patterns.
+	*   `--allow`: (Required) Comma-separated list of allowed glob patterns. Can optionally specify an HTTP verb prefix (e.g. `GET:api.github.com/repos/*`). If no verb prefix is specified, all methods are allowed.
 	*   `--ttl`: Validity duration (default: `10m`).
 	*   `--kid`: Key ID to use (default: `default`).
+	*   `--signer`: Optional string identifying the orchestrator signing the contract.
+	*   `--run-id`: Optional correlation ID for the execution session.
 	*   `--out`: Destination file path for token (prints to stdout by default).
 
 ### Verify a Contract
@@ -195,11 +197,37 @@ Verifies a token string locally against an action.
 *   **Flags**:
 	*   `--token`: The raw signed token string.
 	*   `--token-file`: Path to the signed token file.
-	*   `--action`: (Required) The target action namespace or URL to check.
+	*   `--action`: (Required) The target action namespace or URL to check. If the contract allow patterns specify HTTP verbs (e.g. `GET:api.github.com/*`), the action must specify the matching verb (e.g. `GET:api.github.com/repos/foo`).
 *   **Exit Codes**:
 	*   `0` = Contract is valid and action is permitted.
 	*   `1` = Cryptographic error, format error, or expired/replayed contract.
 	*   `2` = Boundary check failed (policy violation).
+
+### Revoke a Contract
+```bash
+sec revoke [flags]
+```
+Proactively marks a contract as used/revoked in the replay store, preventing any future verification of the contract.
+*   **Flags**:
+	*   `--jti`: The specific contract JTI UUID to revoke.
+	*   `--token-file`: Path to a signed token file to extract the JTI and expiration from.
+*   **Exit Codes**:
+	*   `0` = Contract JTI successfully revoked (or already revoked).
+	*   `1` = Invalid UUID format, failed to parse token, or database error.
+
+### Delegate a Contract
+```bash
+sec delegate [flags]
+```
+Derives a child contract from a verified parent contract, strictly narrowing capabilities.
+*   **Flags**:
+	*   `--parent`: (Required) Path to the parent contract token file.
+	*   `--objective`: (Required) Human objective string for the delegated child contract.
+	*   `--allow`: (Required) Comma-separated list of child allow patterns. Must be a strict subset of the parent's allow patterns.
+	*   `--ttl`: Validity duration. Defaults to the remaining lifetime of the parent contract (clamped to parent expiration).
+	*   `--kid`: Key ID to use for signing (defaults to parent's KID).
+	*   `--max-depth`: Optional maximum delegation depth for the child contract.
+	*   `--out`: Destination file path for token (prints to stdout by default).
 
 ### Check Status
 ```bash

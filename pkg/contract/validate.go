@@ -13,9 +13,20 @@ import (
 // 3. A trailing '*' extends to cover the rest of the path.
 // 4. If there are no wildcards, an exact match is required.
 // 5. Hostnames and paths are normalized to prevent relative path traversal bypasses.
+// 6. If pattern specifies an HTTP verb (e.g. "GET:"), action must match that verb.
 func MatchAction(pattern, action string) bool {
-	pattern = cleanActionOrPattern(pattern)
-	action = cleanActionOrPattern(action)
+	pVerb, pPat := splitVerbAndPattern(pattern)
+	aVerb, aPat := splitVerbAndPattern(action)
+
+	// If pattern specifies a verb, action must match that verb
+	if pVerb != "" {
+		if aVerb == "" || pVerb != aVerb {
+			return false
+		}
+	}
+
+	pattern = cleanActionOrPattern(pPat)
+	action = cleanActionOrPattern(aPat)
 
 	// No wildcards -> exact match
 	if !strings.Contains(pattern, "*") {
@@ -104,4 +115,33 @@ func cleanActionOrPattern(s string) string {
 func matchSegment(patternSeg, actionSeg string) bool {
 	matched, err := path.Match(patternSeg, actionSeg)
 	return err == nil && matched
+}
+
+var validVerbs = map[string]bool{
+	"GET":     true,
+	"POST":    true,
+	"PUT":     true,
+	"PATCH":   true,
+	"DELETE":  true,
+	"HEAD":    true,
+	"OPTIONS": true,
+}
+
+func isValidVerb(v string) bool {
+	return validVerbs[strings.ToUpper(v)]
+}
+
+func splitVerbAndPattern(s string) (verb string, pattern string) {
+	s = strings.TrimSpace(s)
+	idx := strings.Index(s, ":")
+	if idx == -1 {
+		return "", s
+	}
+
+	possibleVerb := strings.ToUpper(s[:idx])
+	if isValidVerb(possibleVerb) {
+		return possibleVerb, s[idx+1:]
+	}
+
+	return "", s
 }

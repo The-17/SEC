@@ -102,6 +102,16 @@ func (s *JTIStore) CheckAndRecord(jti string, exp int64) error {
 	return fmt.Errorf("replay rejected: token %s has already been used", jti)
 }
 
+// Revoke proactively records a JTI as used/revoked.
+// If the JTI is already recorded, it does nothing and returns nil.
+func (s *JTIStore) Revoke(jti string, exp int64) error {
+	_, err := s.db.Exec("INSERT OR IGNORE INTO used_jtis (jti, exp) VALUES (?, ?)", jti, exp)
+	if err != nil {
+		return fmt.Errorf("failed to revoke JTI: %w", err)
+	}
+	return nil
+}
+
 // cleanupExpired removes expired JTI records from the database.
 // This runs asynchronously in a goroutine to avoid blocking the verification path.
 func (s *JTIStore) cleanupExpired() {

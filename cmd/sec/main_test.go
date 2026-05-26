@@ -349,3 +349,198 @@ func TestCLI_InvalidExpiry(t *testing.T) {
 		t.Errorf("expected error type SEC_TOKEN_EXPIRED, got %q", errPayload["error"])
 	}
 }
+
+func TestCLI_Revoke(t *testing.T) {
+	tempHome, err := os.MkdirTemp("", "sec-test-home-revoke-*")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(tempHome)
+
+	// 1. Initialize environment
+	_, _, exitCode, err := runSec(tempHome, "init")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// 2. Sign a token
+	stdout, _, exitCode, err := runSec(tempHome, "sign",
+		"--objective", "revoke test",
+		"--allow", "api.github.com/repos/*",
+		"--ttl", "5m",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("sign failed: %v", err)
+	}
+	token := strings.TrimSpace(stdout)
+
+	// Write token to file for revoke command
+	tokenPath := filepath.Join(tempHome, "token.sec")
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatalf("failed to write token file: %v", err)
+	}
+
+	// 3. Revoke using token-file
+	_, stderr, exitCode, err := runSec(tempHome, "revoke", "--token-file", tokenPath)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("revoke failed: %v, stderr=%s", err, stderr)
+	}
+
+	// 4. Verify should fail with SEC_TOKEN_REPLAYED
+	_, stderr, exitCode, err = runSec(tempHome, "verify",
+		"--token", token,
+		"--action", "api.github.com/repos/The-17/agentsecrets",
+	)
+	if err != nil {
+		t.Fatalf("verify command error: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1 after revocation, got %d", exitCode)
+	}
+	var errPayload map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &errPayload); err != nil {
+		t.Fatalf("expected JSON error response on stderr, got: %s", stderr)
+	}
+	if errPayload["error"] != "SEC_TOKEN_REPLAYED" {
+		t.Errorf("expected error type SEC_TOKEN_REPLAYED, got %q", errPayload["error"])
+	}
+
+	// 5. Test revoking by raw JTI
+	parts := strings.Split(token, ".")
+	payloadBytes, _ := base64.RawURLEncoding.DecodeString(parts[0])
+	var parsed struct {
+		JTI string `json:"jti"`
+	}
+	_ = json.Unmarshal(payloadBytes, &parsed)
+	jti := parsed.JTI
+
+	// Re-verify the error message of revoke with invalid JTI UUID
+	_, _, exitCode, err = runSec(tempHome, "revoke", "--jti", "invalid-jti-uuid")
+	if err != nil || exitCode != 1 {
+		t.Fatalf("expected revoke to fail with invalid uuid, got exitCode=%d", exitCode)
+	}
+
+	// Revoke by raw JTI (idempotent, should succeed)
+	_, _, exitCode, err = runSec(tempHome, "revoke", "--jti", jti)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("revoke by JTI failed: %v", err)
+	}
+}
+
+func TestCLI_Delegate(t *testing.T) {
+	tempHome, err := os.MkdirTemp("", "sec-test-home-delegate-*")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(tempHome)
+
+	// 1. Initialize environment
+	_, _, exitCode, err := runSec(tempHome, "init")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// 2. Sign parent token
+	stdout, _, exitCode, err := runSec(tempHome, "sign",
+		"--objective", "parent contract",
+		"--allow", "GET:api.github.com/repos/*,POST:api.github.com/issues/*",
+		"--ttl", "10m",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("sign parent failed: %v", err)
+	}
+	parentToken := strings.TrimSpace(stdout)
+
+	parentPath := filepath.Join(tempHome, "parent.sec")
+	if err := os.WriteFile(parentPath, []byte(parentToken), 0600); err != nil {
+		t.Fatalf("failed to write parent token: %v", err)
+	}
+
+	// 3. Delegate child token with valid subset
+	stdout, _, exitCode, err = runSec(tempHome, "delegate",
+		"--parent", parentPath,
+		"--objective", "child contract",
+		"--allow", "GET:api.github.com/repos/The-17/agentsecrets/pulls*",
+		"--ttl", "5m",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("delegate failed: %v, stdout=%s", err, stdout)
+	}
+	childToken := strings.TrimSpace(stdout)
+
+	// Verify child token works
+	stdout, _, exitCode, err = runSec(tempHome, "verify",
+		"--token", childToken,
+		"--action", "GET:api.github.com/repos/The-17/agentsecrets/pulls/12",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("verify child token failed: %v, exitCode=%d, stdout=%s", err, exitCode, stdout)
+	}
+
+	// 4. Try delegating invalid subset (escalation to POST)
+	_, stderr, exitCode, err := runSec(tempHome, "delegate",
+		"--parent", parentPath,
+		"--objective", "child contract",
+		"--allow", "POST:api.github.com/repos/The-17/agentsecrets/pulls*",
+		"--ttl", "5m",
+	)
+	if err != nil {
+		t.Fatalf("delegate command error: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("expected delegation to fail, got exitCode=%d", exitCode)
+	}
+	if !strings.Contains(stderr, "delegation error") {
+		t.Errorf("expected error to contain 'delegation error', got %q", stderr)
+	}
+}
+
+func TestCLI_Provenance(t *testing.T) {
+	tempHome, err := os.MkdirTemp("", "sec-test-home-provenance-*")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(tempHome)
+
+	// 1. Initialize environment
+	_, _, exitCode, err := runSec(tempHome, "init")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// 2. Sign token with provenance flags
+	stdout, _, exitCode, err := runSec(tempHome, "sign",
+		"--objective", "provenance test",
+		"--allow", "api.github.com/repos/*",
+		"--signer", "my-orchestrator",
+		"--run-id", "my-run-1234",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("sign failed: %v", err)
+	}
+	token := strings.TrimSpace(stdout)
+
+	// 3. Verify and verify provenance fields in verified JSON
+	stdout, _, exitCode, err = runSec(tempHome, "verify",
+		"--token", token,
+		"--action", "api.github.com/repos/The-17/agentsecrets",
+	)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("verify failed: %v", err)
+	}
+
+	var verified struct {
+		Signer string `json:"signer"`
+		RunID  string `json:"run_id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &verified); err != nil {
+		t.Fatalf("failed to parse verified output JSON: %v, stdout=%s", err, stdout)
+	}
+
+	if verified.Signer != "my-orchestrator" {
+		t.Errorf("expected signer to be 'my-orchestrator', got %q", verified.Signer)
+	}
+	if verified.RunID != "my-run-1234" {
+		t.Errorf("expected run_id to be 'my-run-1234', got %q", verified.RunID)
+	}
+}
