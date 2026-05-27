@@ -43,7 +43,8 @@ brews:
     repository:
       owner: The-17
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      token: "{{ envOrDefault \"HOMEBREW_TAP_TOKEN\" (envOrDefault \"GITHUB_TOKEN\" \"\") }}"
+    skip_upload: "{{ if index .Env \"HOMEBREW_TAP_TOKEN\" }}false{{ else }}true{{ end }}"
     directory: Formula
     homepage: "https://github.com/The-17/sec"
     description: "Signed Execution Contracts (SEC) capability sandbox for agents."
